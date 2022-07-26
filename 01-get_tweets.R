@@ -8,7 +8,6 @@ library(lubridate)
 library(rtweet)
 library(bit64)
 library(disk.frame)
-# library(sparklyr)
 
 source("./resources/best_token.R")
 source("./resources/disk.frame_extensions.R")
@@ -18,8 +17,8 @@ has_name <- rlang::has_name
 ################################################################################
 
 # List of one or multiple Twitter OAuth token(s)
-token_list <- read_rds("./resources/token_list.rds")
-# token_list <- as.list(rtweet::get_token())
+token_list <- as.list(rtweet::get_token())
+# token_list <- read_rds("./resources/token_list.rds")
 
 token_env <- rlang::env()
 
@@ -30,6 +29,10 @@ print_message <- function(...){
   if(!is.list(.GlobalEnv[[".message_pars"]])){
     .GlobalEnv[[".message_pars"]] <- list()
   }
+  
+  .message_pars <- discard(
+    .GlobalEnv[[".message_pars"]], function(..el){isTRUE(all(is.na(..el)))}
+  )
   
   .lines_last <- pluck(.message_pars, ".lines_last", .default=character(0L))
   
@@ -68,7 +71,7 @@ print_message <- function(...){
   
   return(invisible(.message_this))
 
-}; walk(1:10, print_message)
+}
 
 
 dir_data <- dir_create("~/Documents/get_tweets/data")
@@ -123,8 +126,7 @@ rtweet_to_df <- function(
 ){
   
   .dots <- list(...)
-  # .dots <- list(.screen_name=.transp_r$screen_name, .since_id=.from_since_id_this)
-  
+
   stopifnot(.endpoint %in% c("statuses/user_timeline", "search/tweets"))
   
   if(!rlang::env_has(token_env, .endpoint)){
@@ -152,7 +154,7 @@ rtweet_to_df <- function(
     stop("endpoint \"", .endpoint, "\" not supported")
   }
 
-  .tweets_list <- list() # .tweets_list <- tweets_list
+  .tweets_list <- list() 
   .tweets <- disk.frame(path=tmp_df())
 
   .tweets_n <- 0L
@@ -171,7 +173,7 @@ rtweet_to_df <- function(
       tryCatch({
         .tweets_i <- rtweet::tweets_with_users(rtweet:::scroller(
           url=.tweets_rtweet_url_i, n=rtweet:::unique_id_count(type=.type), 
-          n.times=1, type=.type, token_env[[.endpoint]]
+          n.times=1, type=.type, token_env[[.endpoint]], httr::timeout(60)
         ))
         if(is.null(.tweets_i)){stop("rtweet returned NULL")}
       }, error=function(..error){
@@ -190,7 +192,6 @@ rtweet_to_df <- function(
         }
       }, warning = function(..warning){
         if(str_detect(..warning$message, "(?i)(RATE|TIME)[- ]?LIMIT")){
-          # message("changing token for \"", .endpoint, "\"")
           token_env[[.endpoint]] <- suppressMessages(best_token(.endpoint))
           .tweets_i <<- NULL
         }else if(.tweets_i_try_count <= 5){
@@ -240,11 +241,22 @@ rtweet_to_df <- function(
       .tweets_list <- list()
 
       .tweets <- add_chunk(.tweets, .tweets_append)
-
+      
+    
     }
-
-    .GlobalEnv[[".message_pars"]][[.endpoint]] <- .tweets_n
-    print_message()
+    
+    if(.resume){
+      
+      .tweets_i_min_date <- 
+        min(pluck(.tweets_i, "created_at", .default=NA_POSIXct_))
+      
+      .GlobalEnv[[".message_pars"]][[.endpoint]] <- str_c(
+        .tweets_n, replace_na(str_c(" (", .tweets_i_min_date, ")"), replace="")
+      )
+      
+      print_message()
+      
+    }
     
   }
 
@@ -268,23 +280,27 @@ search_tweets_mod <-
 
 get_tweets <- function(.transp_r, .verbose=FALSE){
   
+  .transp_r <<- .transp_r
+  
   .GlobalEnv[[".message_pars"]] <- list(
     screen_name = .transp_r$screen_name
   )
   
   .tweets_raw <- pluck(.transp_r, "tweets", .default=list(NULL))
 
+  .screen_name_dir <- dir_create(
+    path(dir_data, "01-tweets_raw", .transp_r$screen_name)
+  )
+  
+  .from_data_last <- disk.frame(path(.screen_name_dir, "from.df"))
+  .repl_data_last <- disk.frame(path(.screen_name_dir, "repl.df"))
+  
+  
   tryCatch({
-
-    .screen_name_dir <-
-      dir_create(path(dir_data, "01-tweets_raw", .transp_r$screen_name))
     
     ########################
     # GET TWEETS FROM USER #
     ########################
-    
-    .from_data_last <- 
-      disk.frame(path(.screen_name_dir, "from.df"))
     
     if(nrow(.from_data_last) > 0){
 
@@ -560,9 +576,45 @@ get_tweets <- function(.transp_r, .verbose=FALSE){
     .tweets_raw <- list(from_data = .from_data, repl_data = .repl_data)
 
   }, warning = function(..warning){
+    
+    ..tweet_log_entry <- list(
+      message=..warning$message, screen_name=.transp_r$screen_name,
+      time=lubridate::now()
+    )
+    
+    if(is.list(.GlobalEnv[["tweets_logs"]])){
+      modify_in(.GlobalEnv[["tweets_logs"]], "warning", function(...l){
+        compact(append(...l, ..tweet_log_entry))
+      })
+    }
 
-    warning("Warning at ", .transp_r$screen_name, ": ", ..warning$message)
+    message(
+      ..tweet_log_entry$time, " - Warning at ", ..tweet_log_entry$screen_name, 
+      ": ", ..tweet_log_entry$message
+    )
 
+  }, error = function(..error){
+    
+    ..tweet_log_entry <- list(
+      message=..error$message, screen_name=.transp_r$screen_name,
+      time=lubridate::now()
+    )
+    
+    if(is.list(.GlobalEnv[["tweets_logs"]])){
+      modify_in(.GlobalEnv[["tweets_logs"]], "error", function(...l){
+        compact(append(...l, ..tweet_log_entry))
+      })
+    }
+    
+    message(crayon::bold(
+      ..tweet_log_entry$time, " - Error at ", ..tweet_log_entry$screen_name, 
+      ": ", ..tweet_log_entry$message
+    ))
+    
+    .tweets_raw <<- list(
+      from_data = .from_data_last, repl_data = .repl_data_last
+    )
+    
   }, finally = {
 
     suppressMessages({setup_disk.frame(workers=1)}); gc()
@@ -578,7 +630,9 @@ get_tweets <- function(.transp_r, .verbose=FALSE){
 ################################################################################
 
 while(TRUE){
-
+  
+  tweets_log <- list(warning=list(), error=list())
+  
   start_time <- lubridate::now()
 
   if(length(dir_ls(dir_temp)) > 0){dir_create(dir_delete(dir_temp))}
@@ -589,7 +643,10 @@ while(TRUE){
     mutate(tweets_raw = map(transpose(.), get_tweets, .verbose=TRUE)) %>%
     write_rds("./data/tweets_raw_db.rds")
   
-  wait_end_time <- start_time + lubridate::hours(12)
+  wait_end_time <- min(
+    start_time + lubridate::hours(12),
+    ceiling_date(now(tzone="UTC") - hours(12), "day") + hours(12)
+  )
   
   tweets_raw_total_nrow <- 
     tweets_raw_db %>% 
@@ -599,15 +656,28 @@ while(TRUE){
     }) %>% 
     sum()
   
+  tweets_raw_total_size_disk <- 
+    path(dir_data, "01-tweets_raw") %>% 
+    dir_info(recurse=TRUE) %>% 
+    pull(size) %>% 
+    sum()
+    
   .GlobalEnv[[".message_pars"]] <- list(
     `Total amount of tweets` = scales::number(tweets_raw_total_nrow),
+    `Size on disk` = format(tweets_raw_total_size_disk, unit="GB"),
     `Waiting until` = format(wait_end_time)
   )
+  
   print_message()
+  
+  print(tweets_log)
   
   while(lubridate::now() < wait_end_time){
     naptime::naptime(
-      min(lubridate::now() + lubridate::minutes(30), wait_end_time)
+      min(
+        wait_end_time, `hour<-`(today(tzone="UTC"), 12),
+        lubridate::now() + lubridate::minutes(10)
+      )
     )
   }
   
