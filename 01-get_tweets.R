@@ -273,11 +273,6 @@ search_tweets_mod <-
 ################################################################################
 ################################################################################
 
-.transp_r <-
-  delegates_info %>%
-  transpose() %>%
-  pluck(1)
-
 get_tweets <- function(.transp_r, .verbose=FALSE){
   
   .transp_r <<- .transp_r
@@ -643,10 +638,10 @@ while(TRUE){
     mutate(tweets_raw = map(transpose(.), get_tweets, .verbose=TRUE)) %>%
     write_rds("./data/tweets_raw_db.rds")
   
-  wait_end_time <- min(
+  wait_end_time <- with_tz(min(
     start_time + lubridate::hours(12),
     ceiling_date(now(tzone="UTC") - hours(12), "day") + hours(12)
-  )
+  ), tzone="")
   
   tweets_raw_total_nrow <- 
     tweets_raw_db %>% 
@@ -673,12 +668,10 @@ while(TRUE){
   print(tweets_log)
   
   while(lubridate::now() < wait_end_time){
-    naptime::naptime(
-      min(
-        wait_end_time, `hour<-`(today(tzone="UTC"), 12),
-        lubridate::now() + lubridate::minutes(10)
-      )
-    )
+    naptime::naptime(min(
+      wait_end_time, `hour<-`(today(tzone="UTC"), 12),
+      lubridate::now() + lubridate::minutes(10)
+    ))
   }
   
 }

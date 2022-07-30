@@ -176,7 +176,7 @@ rechunk_df <- function(
 
 resuming_cmap <- function(
   .x, .f, ..., .workers=NULL, .scheduling=1, .outdir=tmp_df(list(.x, .f)), 
-  .resume=FALSE, .check=TRUE
+  .resume=FALSE, .overwrite=FALSE, .check=TRUE
 ){
   
   # progressr::handlers(global=TRUE)
@@ -213,6 +213,8 @@ resuming_cmap <- function(
   if(length(.ck_file_list_o) > 0){
     if(isTRUE(.resume)){
       .ck_file_list <- .ck_file_list_i[!.ck_file_list_i %in% .ck_file_list_o]
+    }else if(isTRUE(.overwrite)){
+      fs::dir_create(fs::dir_delete(.df_path_o))
     }else{
       stop(".outdir is not empty and .resume is not TRUE")
     }
@@ -349,18 +351,22 @@ bind_rows_df <- function(
         
         .chunk_hold_nrow_free <- .chunk_size - nrow(.chunk_hold)
         
-        .chunk_temp <- fst::read.fst(
-          path=.files[[.file_id]],
-          from=`+`(.file_i_nrow_copied, 1L),
-          to=`+`(.file_i_nrow_copied, 
-                 min(.file_i_nrow_left, .chunk_hold_nrow_free))
-        )
+        if(.chunk_hold_nrow_free > 0){
+          
+          .chunk_temp <- fst::read.fst(
+            path=.files[[.file_id]],
+            from=`+`(.file_i_nrow_copied, 1L),
+            to=`+`(.file_i_nrow_copied, 
+                   min(.file_i_nrow_left, .chunk_hold_nrow_free))
+          )
+          
+          .chunk_hold <- dplyr::bind_rows(.chunk_hold, .chunk_temp)
+          
+          .file_i_nrow_copied <- .file_i_nrow_copied + nrow(.chunk_temp)
+          
+        }
         
-        .chunk_hold <- dplyr::bind_rows(.chunk_hold, .chunk_temp)
-        
-        .file_i_nrow_copied <- .file_i_nrow_copied + nrow(.chunk_temp)
-        
-        if(nrow(.chunk_hold) == 1e4 | .file_id == length(.files)){
+        if(nrow(.chunk_hold) == .chunk_size | .file_id == length(.files)){
           .disk_frame <- add_chunk(.disk_frame, .chunk_hold)
           .chunk_hold <- tibble()
         }
@@ -387,7 +393,7 @@ bind_rows_df <- function(
         .append_chunk_back_last, .append_chunk_path_last, overwrite=TRUE
       )
     }
-    stop(..error$message)
+    stop(..error)
   }, interrupt=function(..interrupt){
     if(.append){
       file_delete(
