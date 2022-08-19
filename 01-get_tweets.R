@@ -1,13 +1,36 @@
+# TODO:
+
+################################################################################
+
 setwd("~/Documents/get_tweets")
+
+################################################################################
+
+rtweet_version <- 
+  installed.packages() |> 
+  as.data.frame() |>
+  dplyr::filter(Package == "rtweet") |>
+  dplyr::pull(Version)
+
+if(rtweet_version != "0.7.0"){
+  devtools::install_version(
+    "rtweet", version="0.7.0", repos="http://cran.us.r-project.org"
+  )
+}
+
+################################################################################
 
 library(fs)
 library(glue)
 library(tidyverse)
 library(magrittr)
 library(lubridate)
-library(rtweet)
 library(bit64)
+library(rtweet)
 library(disk.frame)
+library(DBI)
+library(RSQLite)
+library(dbplyr)
 
 source("./resources/best_token.R")
 source("./resources/disk.frame_extensions.R")
@@ -16,9 +39,106 @@ has_name <- rlang::has_name
 
 ################################################################################
 
-# List of one or multiple Twitter OAuth token(s)
-token_list <- as.list(rtweet::get_token())
-# token_list <- read_rds("./resources/token_list.rds")
+dir_data <- dir_create("~/Documents/get_tweets/data")
+dir_temp <- dir_create(path(dir_data, "temp"))
+
+################################################################################
+################################################################################
+################################################################################
+
+list_to_json_str <- function(.x){purrr::map_chr(.x, jsonlite::serializeJSON)}
+
+################################################################################
+
+tweet_df_rename_dict <- list(
+  "tweet_status_id"="status_id",
+  "tweet_user_id"="user_id",
+  "tweet_created_at"="created_at", 
+  "tweet_user_screen_name"="screen_name", 
+  "tweet_lang"="lang", 
+  "tweet_text"="text", 
+  "tweet_reply_to_status_id"="reply_to_status_id", 
+  "tweet_reply_to_user_id"="reply_to_user_id",
+  "tweet_reply_to_user_screen_name"="reply_to_screen_name",
+  "tweet_retweet_status_id"="retweet_status_id", 
+  "tweet_retweet_created_at"="retweet_created_at", 
+  "tweet_retweet_user_id"="retweet_user_id", 
+  "tweet_retweet_user_screen_name"="retweet_screen_name", 
+  "tweet_quote_status_id"="quoted_status_id", 
+  "tweet_quote_created_at"="quoted_created_at",
+  "tweet_quote_user_id"="quoted_user_id", 
+  "tweet_quote_user_screen_name"="quoted_screen_name", 
+  "tweet_quote_text"="quoted_text",
+  "tweet_url_json"="urls_expanded_url", 
+  "tweet_media_int_json"="media_expanded_url", 
+  "tweet_media_int_type_json"="media_type", 
+  "tweet_media_ext_json"="ext_media_expanded_url", 
+  "tweet_media_ext_type_json"="ext_media_type"
+)
+
+################################################################################
+
+tweet_df_coercion_funs <- list(
+  "tweet_status_id"=as.integer64, 
+  "tweet_convers_id"=as.integer64,
+  "tweet_convers_user_screen_name"=as.character,
+  "tweet_user_id"=as.integer64, 
+  "tweet_user_screen_name"=as.character, 
+  "tweet_created_at"=as.POSIXct, 
+  "tweet_lang"=as.character, 
+  "tweet_text"=as.character, 
+  "tweet_reply_to_status_id"=as.integer64, 
+  "tweet_reply_to_user_id"=as.integer64,
+  "tweet_reply_to_user_screen_name"=as.character,
+  "tweet_retweet_status_id"=as.integer64, 
+  "tweet_retweet_created_at"=as.POSIXct, 
+  "tweet_retweet_user_id"=as.integer64, 
+  "tweet_retweet_user_screen_name"=as.character, 
+  "tweet_quote_status_id"=as.integer64, 
+  "tweet_quote_created_at"=as.POSIXct,
+  "tweet_quote_user_id"=as.integer64, 
+  "tweet_quote_user_screen_name"=as.character, 
+  "tweet_quote_text"=as.character,
+  "tweet_url_json"=list_to_json_str, 
+  "tweet_media_int_json"=list_to_json_str, 
+  "tweet_media_int_type_json"=list_to_json_str,
+  "tweet_media_ext_json"=list_to_json_str, 
+  "tweet_media_ext_type_json"=list_to_json_str
+)
+
+################################################################################
+
+prep_rtweet_df <- function(.rtweet_df){
+  colnames(.rtweet_df) <- colnames(.rtweet_df) %>% recode(
+    !!!structure(names(tweet_df_rename_dict), names=tweet_df_rename_dict)
+  )
+  .tweet_df <- imap_dfc(tweet_df_coercion_funs, function(..fun, ..name){
+    ..fun(pluck(.rtweet_df, ..name, .default=NA))
+  })
+  if(nrow(.rtweet_df) == 0){
+    .tweet_df <- slice(.tweet_df, integer(0))
+  }
+  return(.tweet_df)
+}
+
+################################################################################
+################################################################################
+################################################################################
+
+tweets_db <- DBI::dbConnect(
+  RSQLite::SQLite(), dbname=path(dir_data, "tweets.db"),
+  extended_types=TRUE
+)
+
+DBI::dbWriteTable(
+  conn=tweets_db, name="tweets_raw", append=TRUE,
+  value=as_tibble(map(tweet_df_coercion_funs, function(.fun){.fun(NULL)}))
+)
+
+################################################################################
+
+token_list <- read_rds("./resources/token_list.rds")
+# token_list <- as.list(rtweet::get_token())
 
 token_env <- rlang::env()
 
@@ -70,12 +190,9 @@ print_message <- function(...){
   .GlobalEnv[[".message_pars"]][[".lines_last"]] <- .lines_this
   
   return(invisible(.message_this))
-
+  
 }
 
-
-dir_data <- dir_create("~/Documents/get_tweets/data")
-dir_temp <- dir_create(path(dir_data, "temp"))
 
 ################################################################################
 
@@ -91,12 +208,6 @@ delegates_info <-
     "democrats",  "us_senate",    "7465836",
     "democrats",  "us_house",     "6136726",
     "democrats",  "us_president", "1529460417738727429",
-    # "spd",        "bundestag",  "60502972",
-    # "gruene",     "bundestag",  "1442481414738382862",
-    # "fdp",        "bundestag",  "1002517865864589312",
-    # "cdu_csu",    "bundestag",  "1442412695873986566",
-    # "afd",        "bundestag",  "912313478706286593",
-    # "linke",      "bundestag",  "1452539649520541699",
   ) %>%
   mutate(lists_members = map(list_id, rtweet::lists_members)) %>%
   select(-list_id) %>%
@@ -110,23 +221,21 @@ delegates_info <-
   summarize(still_in_list = n() > 1, .groups="drop") %>% 
   write_rds("./data/delegates_info.Rds")
 
-summary(
-  mutate(
-    delegates_info, 
-    across(c(where(is.character), where(is.logical)), as.factor)
-  )
-)
+
+delegates_info %>% 
+  mutate(across(c(where(is.character), where(is.logical)), as.factor)) %>% 
+  summary()
 
 ################################################################################
 ################################################################################
 ################################################################################
 
 rtweet_to_df <- function(
-  ..., .max_id=NULL, .since_id="1", .tweets_n_max=Inf, .endpoint
+    ..., .max_id=NULL, .since_id="1", .tweets_n_max=Inf, .endpoint
 ){
   
   .dots <- list(...)
-
+  
   stopifnot(.endpoint %in% c("statuses/user_timeline", "search/tweets"))
   
   if(!rlang::env_has(token_env, .endpoint)){
@@ -136,7 +245,7 @@ rtweet_to_df <- function(
   .param <- list(
     max_id=.max_id, check=TRUE, verbose=FALSE, tweet_mode="extended", count=100
   )
-
+  
   if(.endpoint == "statuses/user_timeline"){
     stopifnot(".screen_name" %in% names(.dots))
     .type <- "timeline"
@@ -153,15 +262,15 @@ rtweet_to_df <- function(
   }else{
     stop("endpoint \"", .endpoint, "\" not supported")
   }
-
-  .tweets_list <- list() 
-  .tweets <- disk.frame(path=tmp_df())
-
+  
+  .tweets_list <- list()
+  .tweets <- prep_rtweet_df(tibble())
+  
   .tweets_n <- 0L
   .resume <- TRUE
-
+  
   while(.resume){
-
+    
     .tweets_i <- NULL
     .tweets_i_try_count <- 1
     
@@ -204,15 +313,15 @@ rtweet_to_df <- function(
       })
       
     }
-
+    
     if(all("status_id" %in% colnames(.tweets_i), nrow(.tweets_i) > 0)){
-
+      
       .tweets_i <- filter(.tweets_i, if_all(status_id, function(..status_id){
         as.integer64(..status_id) > as.integer64(.since_id)
       }))
-  
+      
       .tweets_list <- append(.tweets_list, list(.tweets_i))
-
+      
       .param$max_id <-
         .tweets_i %>%
         pluck("status_id", .default=NA_character_) %>%
@@ -220,29 +329,28 @@ rtweet_to_df <- function(
         min() %>%
         subtract(1) %>%
         as.character()
-
+      
     }
-
+    
     .tweets_n <- .tweets_n + nrow(.tweets_i)
     
     .resume <- all(.tweets_n < .tweets_n_max, nrow(.tweets_i) > 0)
-
+    
     if(all(
       any(length(.tweets_list) == 1e3, !.resume), 
       nrow(first(.tweets_list)) > 0
     )){
-
+      
       .tweets_append <-
         .tweets_list %>%
         keep(function(..tweets){nrow(..tweets) > 0}) %>%
         bind_rows() %>%
-        mutate(across(where(is.list), map_chr, jsonlite::serializeJSON))
-
-      .tweets_list <- list()
-
-      .tweets <- add_chunk(.tweets, .tweets_append)
+        prep_rtweet_df()
       
-    
+      .tweets_list <- list()
+      
+      .tweets <- bind_rows(.tweets, .tweets_append)
+      
     }
     
     if(.resume){
@@ -259,9 +367,9 @@ rtweet_to_df <- function(
     }
     
   }
-
+  
   return(.tweets)
-
+  
 }
 
 get_timeline_mod <- 
@@ -273,23 +381,15 @@ search_tweets_mod <-
 ################################################################################
 ################################################################################
 
+.transp_r <- transpose(delegates_info)[[3]]
+
 get_tweets <- function(.transp_r, .verbose=FALSE){
   
-  .transp_r <<- .transp_r
+  .transp_r <<- .transp_r#; stop()
   
   .GlobalEnv[[".message_pars"]] <- list(
     screen_name = .transp_r$screen_name
   )
-  
-  .tweets_raw <- pluck(.transp_r, "tweets", .default=list(NULL))
-
-  .screen_name_dir <- dir_create(
-    path(dir_data, "01-tweets_raw", .transp_r$screen_name)
-  )
-  
-  .from_data_last <- disk.frame(path(.screen_name_dir, "from.df"))
-  .repl_data_last <- disk.frame(path(.screen_name_dir, "repl.df"))
-  
   
   tryCatch({
     
@@ -297,279 +397,181 @@ get_tweets <- function(.transp_r, .verbose=FALSE){
     # GET TWEETS FROM USER #
     ########################
     
-    if(nrow(.from_data_last) > 0){
-
-      if(file_exists(path(.screen_name_dir, "from_max_status_id_coll"))){
-        .from_since_id_this <-
-          read_file(path(.screen_name_dir, "from_max_status_id_coll"))
-      }else{
-        .from_since_id_this <-
-          .from_data_last %>%
-          collect_cols.df(.cols_want="status_id", .trans_fun=as.integer64) %>%
-          pluck("status_id") %>%
-          `[`(which.max(as.integer64(.))) %>%
-          as.character()
-      }
-
+    .from_data_last <- 
+      tweets_db %>% 
+      tbl("tweets_raw") %>% 
+      filter(
+        tweet_convers_user_screen_name == !!.transp_r$screen_name,
+        tweet_convers_user_screen_name == tweet_user_screen_name
+      )
+    
+    if(pull(tally(.from_data_last), n) > 0){
+      
+      .from_since_id_this <-
+        .from_data_last %>%
+        summarise(across(tweet_status_id, max, na.rm=TRUE)) %>% 
+        pull(tweet_status_id)
+      
     }else{
-
+      
       .from_since_id_this <-
         str_c(str_c(c(letters, as.character(0:9)), collapse=" OR "),
               " until:", as_date(now(tzone="UTC") - days(5))) %>%
-        search_tweets(n=1) %>%
-        pluck("status_id", 1)
-
+        search_tweets(n=1) %>% 
+        prep_rtweet_df() %>% 
+        pull(tweet_status_id)
+      
     }
-
-    .from_data_this <- get_timeline_mod(
-      .screen_name=.transp_r$screen_name, .since_id=.from_since_id_this
-    )
-
+    
+    .from_data_this <- 
+      get_timeline_mod(
+        .screen_name=.transp_r$screen_name, 
+        .since_id=as.character(.from_since_id_this)
+      ) %>% 
+      mutate(
+        tweet_convers_id = tweet_status_id,
+        tweet_convers_user_screen_name=tweet_user_screen_name
+      )
+    
     if(nrow(.from_data_this) > 0){
-
+      
       .from_data_this_max_status_id_coll <-
         .from_data_this %>%
-        collect_cols.df(.cols_want="status_id") %>%
-        pluck("status_id") %>%
-        `[`(which.max(as.integer64(.)))
-
-      .from_data <-
-        list(.from_data_last, .from_data_this) %>%
-        bind_rows_df(.outdir=tmp_df()) %>%
-        write_disk.frame(outdir=path(.screen_name_dir, "from.df"),
-                         overwrite=TRUE)
-
-      invisible(cmap(.from_data, function(..chunk){
-        invisible(..chunk); rm(..chunk); gc(); return(NULL)
-      }, lazy=FALSE))
-
-      write_file(
-        .from_data_this_max_status_id_coll,
-        path(.screen_name_dir, "from_max_status_id_coll")
+        summarise(across(tweet_status_id, max)) %>% 
+        pull(tweet_status_id)
+      
+      DBI::dbWriteTable(
+        conn=tweets_db, name="tweets_raw", append=TRUE,
+        value=.from_data_this
       )
-
-    }else{
-
-      .from_data <- .from_data_last
-
-    }
-
+      
+    }  
+    
     gc()
     
-    if(!isTRUE(nrow(.from_data) > 0)){return(NULL)}
-
+    if(!isTRUE(pull(tally(.from_data_last), n) > 0)){return(invisible(NULL))}
+    
     #########################################
     # GET TWEETS REPLYING TO TWEETS BY USER #
     #########################################
-
-    .repl_data_last <- disk.frame(path(.screen_name_dir, "repl.df"))
-
-    if(nrow(.repl_data_last) > 0){
-
-      if(file_exists(path(.screen_name_dir, "repl_max_status_id_coll"))){
-        .repl_since_id_this <-
-          read_file(path(.screen_name_dir, "repl_max_status_id_coll"))
-      }else{
-        .repl_since_id_this <-
-          .repl_data_last %>%
-          collect_cols.df(.cols_want="status_id", .trans_fun=as.integer64) %>%
-          pluck("status_id") %>%
-          `[`(which.max(as.integer64(.))) %>%
-          as.character()
-      }
-
+    
+    .repl_data_last <- 
+      tweets_db %>% 
+      tbl("tweets_raw") %>% 
+      filter(
+        tweet_convers_user_screen_name == !!.transp_r$screen_name,
+        tweet_convers_user_screen_name != tweet_user_screen_name
+      )
+    
+    if(pull(tally(.repl_data_last), n) > 0){
+      
+      .repl_since_id_this <-
+        .repl_data_last %>%
+        summarise(across(tweet_status_id, max, na.rm=TRUE)) %>% 
+        pull(tweet_status_id)
+      
     }else{
-
-      .repl_since_id_this <- "1"
-
+      
+      .repl_since_id_this <- 
+        .from_data_last %>% 
+        summarise(across(tweet_status_id, min, na.rm=TRUE)) %>% 
+        pull(tweet_status_id)
+      
     }
-
-    gc()
     
     .repl_data_this <- search_tweets_mod(
       .search_query=glue(
         "@{.transp_r$screen_name} filter:replies ",
         "until:{as_date(now(tzone='UTC') - hours(12))}"
       ), 
-      .since_id=.repl_since_id_this
+      .since_id=as.character(.repl_since_id_this)
     )
-
-    gc()
-
+    
     .repl_data_this_nrow_coll <- nrow(.repl_data_this)
-
+    
     if(.repl_data_this_nrow_coll > 0){
-
+      
       .repl_data_this_max_status_id_coll <-
+        .repl_data_this %>% 
+        summarise(across(tweet_status_id, max)) %>% 
+        pull(tweet_status_id)
+      
+      .repl_data_this_status_repl_id <-
         .repl_data_this %>%
-        collect_cols.df(.cols_want="status_id", .trans_fun=as.integer64) %>%
-        pluck("status_id") %>%
-        `[`(which.max(as.integer64(.))) %>%
-        as.character()
-
-      if(all(
-        c("status_id", "reply_to_status_id") %in% colnames(.repl_data_this),
-        nrow(.from_data) > 0
-      )){
-
-        .repl_data_this_nrow_coll <- nrow(.repl_data_this)
-
-        .repl_data_this_status_repl_id <-
-          .repl_data_this %>%
-          collect_cols.df(
-            .cols_want=c("status_id", "reply_to_status_id"),
-            .trans_fun=as.integer64
-          ) %>%
-          drop_na() %>%
-          distinct()
-
-        if(all(
-          c("status_id", "reply_to_status_id") %in% colnames(.repl_data_last)
-        )){
+        select(tweet_status_id, tweet_reply_to_status_id) %>% 
+        drop_na()
+      
+      .repl_data_last_status_convers_id <-
+        .repl_data_last %>%
+        select(tweet_status_id, tweet_convers_id) %>% 
+        collect() %>% 
+        drop_na()
+      
+      .repl_data_status_id <- c(
+        .repl_data_this_status_repl_id$tweet_status_id,
+        .repl_data_last_status_convers_id$tweet_status_id
+      )
+      
+      .convers_status_oldest <- 
+        min(.repl_data_this$tweet_created_at) - weeks(4)
+      
+      .convers_status_id_this <-
+        .from_data_last %>% 
+        filter(
+          is.na(tweet_retweet_status_id),
+          as.integer(tweet_created_at) > !!as.integer(.convers_status_oldest)
+        ) %>% 
+        select(tweet_convers_id = tweet_status_id) %>%
+        collect() %>% 
+        drop_na() %>% 
+        mutate(tweet_status_id = map(tweet_convers_id, function(..convers_id){
           
-          .repl_data_last_status_convers_id <-
-            .repl_data_last %>%
-            collect_cols.df(
-              .cols_want=c("status_id", "convers_id"),
-              .trans_fun=as.integer64
-            ) %>%
-            drop_na() %>%
-            distinct()
+          ..status_id_last <-
+            .repl_data_last_status_convers_id %>%
+            filter(tweet_convers_id == ..convers_id) %>%
+            pull(tweet_status_id)
           
-        }else{
+          ..status_id_this <- integer64()
+          ..status_id_this_i <- c(..convers_id, ..status_id_last)
           
-          .repl_data_last_status_convers_id <- tibble(
-            status_id=integer64(), convers_id=integer64()
-          )
-          
-        }
-
-        gc()
-
-        .repl_data_status_id <- c(
-          .repl_data_this_status_repl_id$status_id,
-          .repl_data_last_status_convers_id$status_id
-        )
-
-        .convers_status_id_this <-
-          .from_data %>%
-          srckeep(c("status_id", "is_retweet", "created_at")) %>%
-          cmap_dfr(function(..chunk){
-            transmute(
-              filter(..chunk, !is_retweet & created_at > now() - weeks(4)), 
-              convers_id = as.integer64(status_id)
-            )
-          }) %>%
-          drop_na() %>%
-          distinct()
-
-        .convers_status_id_this <-
-          .convers_status_id_this %>%
-          mutate(status_id = map(convers_id, function(..convers_id){
-            
-            if("convers_id" %in% colnames(.repl_data_last)){
-              ..status_id_last <-
-                .repl_data_last_status_convers_id %>%
-                filter(convers_id == ..convers_id) %>%
-                pull(status_id)
-            }else{
-              ..status_id_last <- character(0)
+          if(nrow(.repl_data_this_status_repl_id) > 0){
+            while(length(..status_id_this_i) > 0){
+              ..status_id_this_i <-
+                .repl_data_this_status_repl_id %>%
+                filter(tweet_reply_to_status_id %in% ..status_id_this_i) %>%
+                pull(tweet_status_id)
+              ..status_id_this <-
+                append(..status_id_this, ..status_id_this_i)
             }
-            ..status_id_this <- character(0)
-            ..status_id_this_i <- c(..convers_id, ..status_id_last)
-            if(nrow(.repl_data_this_status_repl_id) > 0){
-              while(length(..status_id_this_i) > 0){
-                ..status_id_this_i <-
-                  .repl_data_this_status_repl_id %>%
-                  filter(reply_to_status_id %in% ..status_id_this_i) %>%
-                  pull(status_id)
-                ..status_id_this <-
-                  append(..status_id_this, ..status_id_this_i)
-              }
-            }
-            ..status_id_this <- unique(..status_id_this)
-            
-            return(..status_id_this)
-            
-          })) %>%
-          as_tibble() %>%
-          mutate(
-            convers_id = as.character(convers_id),
-            status_id = map(status_id, as.character)
-          ) %>%
-          unnest_longer(status_id) %>%
-          drop_na()
-
-        if(nrow(.convers_status_id_this) > 0){
-
-          .repl_data_this <-
-            .repl_data_this %>%
-            resuming_cmap(function(..chunk){
-              dplyr::inner_join(
-                ..chunk, .convers_status_id_this, by="status_id"
-              )
-            })
-
-        }else{
-
-          .repl_data_this <- disk.frame(tmp_df())
-
-        }
-        
-        .GlobalEnv[[".message_pars"]][["valid reply share"]] <- 
-          scales::percent(nrow(.repl_data_this) / .repl_data_this_nrow_coll)
-          print_message()
-        
-      }else{
-
-        .repl_data_this <- disk.frame(tmp_df())
-
-      }
-
-      ####
-
-      if(nrow(.repl_data_this) > 0){
-
-        .repl_data <-
-          list(.repl_data_last, .repl_data_this) %>%
-          bind_rows_df(.outdir=path(.screen_name_dir, "repl.df"))
-
-      }else{
-
-        .repl_data <- .repl_data_last
-
-      }
-
-
-      if(nrow(.repl_data) > 0){
-
-        invisible(cmap(.repl_data, function(..chunk){
-          invisible(..chunk); rm(..chunk); gc(); return(NULL)
-        }, lazy=FALSE))
-
-      }
-
-      if(.repl_data_this_nrow_coll > 0){
-        write_file(
-          .repl_data_this_max_status_id_coll,
-          path(.screen_name_dir, "repl_max_status_id_coll")
-        )
-      }
-
-      gc()
-
-    }else{
-
-      .repl_data <- disk.frame(path(.screen_name_dir, "repl.df"))
-
+          }
+          
+          ..status_id_this <- unique(..status_id_this)
+          
+          return(..status_id_this)
+          
+        })) %>%
+        as_tibble() %>%
+        unnest_longer(tweet_status_id) %>%
+        drop_na()
+      
+      .repl_data_this <- 
+        select(.repl_data_this, -tweet_convers_id) %>% 
+        dplyr::inner_join(
+          .convers_status_id_this, by="tweet_status_id"
+        ) %>% 
+        mutate(tweet_convers_user_screen_name = .transp_r$screen_name)
+      
+      DBI::dbWriteTable(
+        conn=tweets_db, name="tweets_raw", append=TRUE,
+        value=.repl_data_this
+      )
+      
+      .GlobalEnv[[".message_pars"]][["valid reply share"]] <- 
+        scales::percent(nrow(.repl_data_this) / .repl_data_this_nrow_coll)
+      print_message()
+      
     }
-
-    ##################
-    # PREPARE OUTPUT #
-    ##################
-
-    .tweets_raw <- list(from_data = .from_data, repl_data = .repl_data)
-
+    
   }, warning = function(..warning){
     
     ..tweet_log_entry <- list(
@@ -582,12 +584,14 @@ get_tweets <- function(.transp_r, .verbose=FALSE){
         compact(append(...l, ..tweet_log_entry))
       })
     }
-
+    
     message(
       ..tweet_log_entry$time, " - Warning at ", ..tweet_log_entry$screen_name, 
       ": ", ..tweet_log_entry$message
     )
-
+    
+    stop()
+    
   }, error = function(..error){
     
     ..tweet_log_entry <- list(
@@ -606,18 +610,13 @@ get_tweets <- function(.transp_r, .verbose=FALSE){
       ": ", ..tweet_log_entry$message
     ))
     
-    .tweets_raw <<- list(
-      from_data = .from_data_last, repl_data = .repl_data_last
-    )
+    stop()
     
-  }, finally = {
-
-    suppressMessages({setup_disk.frame(workers=1)}); gc()
-
   })
-
-  return(.tweets_raw)
-
+  
+  gc()
+  return(invisible(NULL))
+  
 }
 
 ################################################################################
@@ -629,7 +628,7 @@ while(TRUE){
   tweets_log <- list(warning=list(), error=list())
   
   start_time <- lubridate::now()
-
+  
   if(length(dir_ls(dir_temp)) > 0){dir_create(dir_delete(dir_temp))}
   
   tweets_raw_db <-
@@ -656,7 +655,7 @@ while(TRUE){
     dir_info(recurse=TRUE) %>% 
     pull(size) %>% 
     sum()
-    
+  
   .GlobalEnv[[".message_pars"]] <- list(
     `Total amount of tweets` = scales::number(tweets_raw_total_nrow),
     `Size on disk` = format(tweets_raw_total_size_disk, unit="GB"),
@@ -675,3 +674,4 @@ while(TRUE){
   }
   
 }
+
