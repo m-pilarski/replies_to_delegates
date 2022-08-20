@@ -1,2 +1,4 @@
 *.Rhistory
 *token_list*
+.Rproj.user
+*.Rproj

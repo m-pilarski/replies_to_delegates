@@ -2,18 +2,53 @@
 output: github_document
 ---
 
-<!-- README.md is generated from README.Rmd. Please edit that file -->
-
 ```{r, include = FALSE}
+
 knitr::opts_chunk$set(
   collapse=TRUE,
   comment="#>",
-  # fig.path="man/figures/README-",
   out.width="100%"
 )
-options(tibble.print_min = 5, tibble.print_max = 5)
+
+options(
+  tibble.print_min=5, 
+  tibble.print_max=5,
+  width=80
+)
+
 ```
 
-# TTT
+# get_replies_delegates
 
-ttt
+## Overview
+
+Scripts that can be used to collect all Twitter coversations started by members of the US congress. The replies are collected via the [standard search (Version 1.1)](https://developer.twitter.com/en/docs/twitter-api/v1/tweets/search/api-reference/get-search-tweets) API endpoint. As my access to historical data through this API enpoint is limited to the past ~7 days, the script has to be executed repeatedly.
+
+## ...
+
+```{r, message=FALSE}
+
+library(tidyverse)
+
+dir_data <- fs::dir_create("~/Documents/get_tweets/data")
+
+tweets_db <- DBI::dbConnect(
+  drv=RSQLite::SQLite(), 
+  dbname=fs::path(dir_data, "tweets", ext="db"),
+  extended_types=TRUE
+)
+
+DBI::dbListTables(tweets_db)
+
+```
+
+
+```{r}
+
+tbl(tweets_db, "tweets_raw")
+
+pull(tally(tbl(tweets_db, "tweets_raw")), n)
+
+```
+
+
