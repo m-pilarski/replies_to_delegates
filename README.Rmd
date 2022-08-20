@@ -49,6 +49,11 @@ tbl(tweets_db, "tweets_raw")
 
 pull(tally(tbl(tweets_db, "tweets_raw")), n)
 
+tbl(tweets_db, "tweets_raw") %>% 
+  group_by(lubridate::as_date(tweet_created_at)) %>% 
+  summarise(count = n()) %>% 
+  collect()
+
 ```
 
 
