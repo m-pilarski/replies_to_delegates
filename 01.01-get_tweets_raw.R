@@ -1,5 +1,7 @@
 # TODO:
-  
+# - convert list columns from "serializejson" to "tojson" and adjust 
+#   rtweet_list_to_json()
+
 ################################################################################
 
 setwd("~/Documents/get_tweets")
@@ -33,10 +35,6 @@ dir_temp <- dir_create(path(dir_data, "temp"))
 
 ################################################################################
 ################################################################################
-################################################################################
-
-list_to_json_str <- function(.x){purrr::map_chr(.x, jsonlite::serializeJSON)}
-
 ################################################################################
 
 tweet_df_rename_dict <- list(
@@ -89,19 +87,21 @@ tweet_df_coercion_funs <- list(
   "tweet_quote_user_id"=as.integer64, 
   "tweet_quote_user_screen_name"=as.character, 
   "tweet_quote_text"=as.character,
-  "tweet_url_json"=list_to_json_str, 
-  "tweet_media_int_json"=list_to_json_str, 
-  "tweet_media_int_type_json"=list_to_json_str,
-  "tweet_media_ext_json"=list_to_json_str, 
-  "tweet_media_ext_type_json"=list_to_json_str
+  "tweet_url_json"=rtweet_list_to_json, 
+  "tweet_media_int_json"=rtweet_list_to_json, 
+  "tweet_media_int_type_json"=rtweet_list_to_json,
+  "tweet_media_ext_json"=rtweet_list_to_json, 
+  "tweet_media_ext_type_json"=rtweet_list_to_json
 )
 
 ################################################################################
 
 prep_rtweet_df <- function(.rtweet_df){
   
-  colnames(.rtweet_df) <- colnames(.rtweet_df) %>% recode(
-    !!!structure(names(tweet_df_rename_dict), names=tweet_df_rename_dict)
+  colnames(.rtweet_df) <- recode(
+    colnames(.rtweet_df),
+    !!!structure(names(tweet_df_rename_dict), names=tweet_df_rename_dict),
+    .default=NULL
   )
   .tweet_df <- imap_dfc(tweet_df_coercion_funs, function(..fun, ..name){
     ..fun(pluck(.rtweet_df, ..name, .default=NA))
@@ -117,15 +117,55 @@ prep_rtweet_df <- function(.rtweet_df){
 ################################################################################
 ################################################################################
 
-tweets_db <- DBI::dbConnect(
-  drv=RSQLite::SQLite(), dbname=path(dir_data, "tweets.db"),
-  extended_types=TRUE
+tweets_db <- dbConnect(
+  drv=SQLite(), dbname=path(dir_data, "tweets.db"), extended_types=TRUE
 )
 
-DBI::dbWriteTable(
-  conn=tweets_db, name="tweets_raw_tmp", overwrite=TRUE, 
-  value=prep_rtweet_df(data.frame())
-)
+if(!"tweets_raw" %in% dbListTables(tweets_db)){
+  dbWriteTable(
+    conn=tweets_db, name="tweets_raw", value=prep_rtweet_df(data.frame())
+  )
+}
+
+# tweets_raw_tbl <- tbl(tweets_db, "tweets_raw")
+# delegates_info_tbl <- tbl(tweets_db, "delegates_info")
+# 
+# tweets_raw_tmp <-
+#   left_join(
+#     tweets_raw_tbl,
+#     select(
+#       delegates_info_tbl, tweet_convers_user_screen_name, tweet_convers_user_id
+#     ),
+#     by="tweet_convers_user_screen_name"
+#   ) %>%
+#   select(names(tweet_df_coercion_funs)) %>%
+#   collect() %>%
+#   distinct(tweet_status_id, .keep_all=TRUE)
+# 
+# tweets_raw_tmp %>% 
+#   # mutate(across(c(where(is.character), where(is.logical)), as.factor)) %>% 
+#   summary()
+# 
+# DBI::dbListTables(tweets_db)
+# 
+# DBI::dbRemoveTable(conn=tweets_db, name="tweets_raw_tmp")
+# 
+# DBI::dbWriteTable(
+#   conn=tweets_db, name="tweets_raw", value=tweets_raw_tmp
+# )
+#
+# DBI::dbRemoveTable(conn=tweets_db, name="tweets_raw")
+# 
+# DBI::dbExecute(tweets_db, "ALTER TABLE tweets_raw_tmp RENAME TO tweets_raw;")
+# 
+# DBI::dbRemoveTable(conn=tweets_db, name="tweets_raw_tmp")
+
+################################################################################
+
+# tweets_raw <- 
+#   tweets_db %>% 
+#   tbl("tweets_raw") %>% 
+#   collect()
 
 ################################################################################
 
@@ -350,8 +390,9 @@ get_tweets <- function(.transp_r, .verbose=FALSE){
   
   .GlobalEnv[[".message_pars"]] <- list(
     screen_name = str_c(
-      .transp_r$tweet_convers_user_screen_name, "(",
-      scales::percent(.transp_r$obs_id_rel_max, accuracy=1), ")")
+      .transp_r$tweet_convers_user_screen_name, " (",
+      scales::percent(.transp_r$obs_id_rel_max, accuracy=1), ")"
+    )
   )
   
   tryCatch({
@@ -525,7 +566,12 @@ get_tweets <- function(.transp_r, .verbose=FALSE){
         dplyr::inner_join(
           .convers_status_id_this, by="tweet_status_id"
         ) %>% 
-        mutate(tweet_convers_user_screen_name = .transp_r$screen_name)
+        mutate(
+          tweet_convers_user_screen_name = 
+            .transp_r$tweet_convers_user_screen_name,
+          tweet_convers_user_id = 
+            .transp_r$tweet_convers_user_id
+        )
       
       DBI::dbWriteTable(
         conn=tweets_db, name="tweets_raw", append=TRUE,
@@ -599,13 +645,7 @@ while(TRUE){
   start_time <- lubridate::now()
 
   if(length(dir_ls(dir_temp)) > 0){dir_create(dir_delete(dir_temp))}
-  
-  # tweets_raw_db <-
-  #   delegates_info %>% 
-  #   slice_sample(prop=1) %>% 
-  #   mutate(tweets_raw = map(transpose(.), get_tweets, .verbose=TRUE)) %>%
-  #   write_rds("./data/tweets_raw_db.rds")
-  
+
   tweets_raw_db <- 
     delegates_info %>% 
     slice_sample(prop=1) %>%
@@ -640,6 +680,8 @@ while(TRUE){
   print_message()
   
   print(tweets_log)
+  
+  gc()
   
   while(lubridate::now() < wait_end_time){
     
