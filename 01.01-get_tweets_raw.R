@@ -127,46 +127,6 @@ if(!"tweets_raw" %in% dbListTables(tweets_db)){
   )
 }
 
-# tweets_raw_tbl <- tbl(tweets_db, "tweets_raw")
-# delegates_info_tbl <- tbl(tweets_db, "delegates_info")
-# 
-# tweets_raw_tmp <-
-#   left_join(
-#     tweets_raw_tbl,
-#     select(
-#       delegates_info_tbl, tweet_convers_user_screen_name, tweet_convers_user_id
-#     ),
-#     by="tweet_convers_user_screen_name"
-#   ) %>%
-#   select(names(tweet_df_coercion_funs)) %>%
-#   collect() %>%
-#   distinct(tweet_status_id, .keep_all=TRUE)
-# 
-# tweets_raw_tmp %>% 
-#   # mutate(across(c(where(is.character), where(is.logical)), as.factor)) %>% 
-#   summary()
-# 
-# DBI::dbListTables(tweets_db)
-# 
-# DBI::dbRemoveTable(conn=tweets_db, name="tweets_raw_tmp")
-# 
-# DBI::dbWriteTable(
-#   conn=tweets_db, name="tweets_raw", value=tweets_raw_tmp
-# )
-#
-# DBI::dbRemoveTable(conn=tweets_db, name="tweets_raw")
-# 
-# DBI::dbExecute(tweets_db, "ALTER TABLE tweets_raw_tmp RENAME TO tweets_raw;")
-# 
-# DBI::dbRemoveTable(conn=tweets_db, name="tweets_raw_tmp")
-
-################################################################################
-
-# tweets_raw <- 
-#   tweets_db %>% 
-#   tbl("tweets_raw") %>% 
-#   collect()
-
 ################################################################################
 
 token_list <- read_rds("./resources/token_list.rds")
