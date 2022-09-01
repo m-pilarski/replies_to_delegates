@@ -1,5 +1,7 @@
 ---
 output: github_document
+editor_options: 
+  chunk_output_type: console
 ---
 
 ```{r, include = FALSE}
@@ -29,16 +31,17 @@ Scripts that can be used to collect all Twitter coversations started by members 
 ```{r, message=FALSE}
 
 library(tidyverse)
+library(DBI)
 
-dir_data <- fs::dir_create("~/Documents/get_tweets/data")
+dir_data <- "~/Documents/get_tweets/data"
 
-tweets_db <- DBI::dbConnect(
+tweets_db <- dbConnect(
   drv=RSQLite::SQLite(), 
   dbname=fs::path(dir_data, "tweets", ext="db"),
   extended_types=TRUE
 )
 
-DBI::dbListTables(tweets_db)
+dbListTables(tweets_db)
 
 ```
 
@@ -47,12 +50,83 @@ DBI::dbListTables(tweets_db)
 
 tbl(tweets_db, "tweets_raw")
 
+# Number of rows
 pull(tally(tbl(tweets_db, "tweets_raw")), n)
 
-tbl(tweets_db, "tweets_raw") %>% 
-  group_by(lubridate::as_date(tweet_created_at)) %>% 
-  summarise(count = n()) %>% 
-  collect()
+```
+
+
+```{r, fig.retina=TRUE}
+
+tweets_count <- local({
+  
+  .tweets_count_chunk_size <- 1e6L
+  
+  .tweets_count_statement <- str_c(
+    "SELECT `tweet_convers_user_screen_name`, `tweet_created_at` ",
+    "FROM `tweets_raw`"
+  )
+  
+  .tweets_count <- tibble()
+  
+  .tweets_count_query <- DBI::dbSendQuery(
+    conn=tweets_db, statement=.tweets_count_statement
+  )
+  
+  repeat{
+    
+    .chunk_raw <- dbFetch(res=.tweets_count_query, n=.tweets_count_chunk_size)
+    
+    if(nrow(.chunk_raw) == 0){break()}
+    
+    .tweets_count <- 
+      .chunk_raw %>% 
+      count(
+        tweet_convers_user_screen_name,
+        tweet_created_at_day = lubridate::as_date(tweet_created_at), 
+        name="count"
+      ) %>% 
+      bind_rows(.tweets_count) %>% 
+      group_by(across(-count)) %>% 
+      summarize(across(count, sum), .groups="drop")
+    
+    gc()
+    
+  }
+  
+  dbClearResult(.tweets_count_query)
+  
+  .delegates_info <- 
+    tbl(tweets_db, "delegates_info") %>% 
+    select(
+      tweet_convers_user_screen_name, 
+      tweet_convers_user_party = party,
+      tweet_convers_user_role = role
+    ) %>% 
+    collect()
+  
+  .tweets_count <- left_join(
+    .tweets_count, .delegates_info, by="tweet_convers_user_screen_name"
+  )
+  
+  return(.tweets_count)
+  
+})
+
+tweets_count %>% 
+  group_by(tweet_convers_user_party, tweet_created_at_day) %>% 
+  summarise(across(count, sum), .groups="drop") %>% 
+  mutate(count = modify_if(
+    as.double(count), tweet_convers_user_party != "democrats", `*`, -1
+  )) %>% 
+  filter(tweet_created_at_day > lubridate::ymd("2022-06-01")) %>% 
+  ggplot(
+    aes(x=tweet_created_at_day, y=count, fill=tweet_convers_user_party)
+  ) + 
+  geom_col(width=1) +
+  scale_y_continuous(labels=function(.b){scales::number(abs(.b))}) +
+  rcartocolor::scale_fill_carto_d(palette="Safe") +
+  theme(legend.position="bottom")
 
 ```
 
