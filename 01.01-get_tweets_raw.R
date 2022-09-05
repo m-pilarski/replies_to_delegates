@@ -28,6 +28,8 @@ library(dbplyr)
 
 source("./resources/utils.R")
 
+`%|0|%` <- rlang:::`%|0|%`
+
 ################################################################################
 
 dir_data <- dir_create("~/Documents/get_tweets/data")
@@ -127,6 +129,29 @@ if(!"tweets_raw" %in% dbListTables(tweets_db)){
   )
 }
 
+if(!"delegates_info" %in% dbListTables(tweets_db)){
+  dbWriteTable(
+    conn=tweets_db, name="tweets_raw", 
+    value=tibble(
+      tweet_convers_user_screen_name = character(0L),
+      tweet_convers_user_id = integer64(0L),
+      party = character(0L),
+      role = character(0L),
+      still_in_list = logical(0L),
+      from_data_last_search_until_id = integer64(0L),
+      repl_data_last_search_until_id = integer64(0L)
+    )
+  )
+}
+
+# dbExecute(
+#   tweets_db,
+#   str_c(
+#     "ALTER TABLE `delegates_info` ",
+#     "ADD COLUMN `repl_data_last_search_until_date` TIMESTAMP"
+#   )
+# )
+
 ################################################################################
 
 token_list <- read_rds("./resources/token_list.rds")
@@ -135,46 +160,53 @@ token_env <- rlang::env()
 
 ################################################################################
 
-if(!file_exists("./data/delegates_info.Rds")){
-  write_rds(tibble(.rows=0), "./data/delegates_info.Rds")
-}
-
-delegates_info <-
-  tribble(
-    ~party,       ~role,          ~list_id,
-    "republican", "us_senate",    "559315",
-    "republican", "us_house",     "817470159027929089",
-    "democrats",  "us_senate",    "7465836",
-    "democrats",  "us_house",     "6136726",
-    "democrats",  "us_president", "1529460417738727429",
-  ) %>%
-  mutate(lists_members = map(list_id, rtweet::lists_members)) %>%
-  select(-list_id) %>%
-  unnest(lists_members) %>%
-  group_by(
-    tweet_convers_user_screen_name = screen_name, 
-    tweet_convers_user_id = as.integer64(user_id)
-  ) %>%
-  summarize(
-    across(c(party, role), function(.vec){
-      if_else(n_distinct(.vec) == 1, unique(.vec), "multiple")
-    }), 
-    .groups="drop"
-  ) %>%
-  bind_rows(read_rds("./data/delegates_info.Rds")) %>% 
-  group_by(
-    tweet_convers_user_screen_name, tweet_convers_user_id, party, role
-  ) %>%
-  summarize(still_in_list = n() > 1, .groups="drop") %>% 
-  write_rds("./data/delegates_info.Rds")
-
-delegates_info %>% 
-  mutate(across(c(where(is.character), where(is.logical)), as.factor)) %>% 
-  summary()
-
-DBI::dbWriteTable(
-  conn=tweets_db, name="delegates_info", overwrite=TRUE, value=delegates_info
-)
+local({
+  
+  .delegates_info <-
+    tribble(
+      ~party,       ~role,          ~list_id,
+      "republican", "us_senate",    "559315",
+      "republican", "us_house",     "817470159027929089",
+      "democrats",  "us_senate",    "7465836",
+      "democrats",  "us_house",     "6136726",
+      "democrats",  "us_president", "1529460417738727429",
+    ) %>%
+    mutate(lists_members = map(list_id, rtweet::lists_members)) %>%
+    select(-list_id) %>%
+    unnest(lists_members) %>%
+    group_by(
+      tweet_convers_user_screen_name = screen_name, 
+      tweet_convers_user_id = as.integer64(user_id)
+    ) %>%
+    summarize(
+      across(c(party, role), function(.vec){
+        if_else(n_distinct(.vec) == 1, unique(.vec), "multiple")
+      }), 
+      .groups="drop"
+    ) %>%
+    bind_rows(dbGetQuery(tweets_db, "SELECT * FROM `delegates_info`")) %>% 
+    group_by(
+      tweet_convers_user_screen_name, tweet_convers_user_id, party, role
+    ) %>%
+    summarize(
+      still_in_list = n() > 1, 
+      across(
+        matches("^(from|repl)_data_last_(search)?_until_id$"),
+        function(.vec){unique(discard(.vec, is.na)) %|0|% NA_character_}
+      ),
+      across(
+        repl_data_last_search_until_date,
+        function(.vec){unique(discard(.vec, is.na)) %|0|% NA_POSIXct_}
+      ),
+      .groups="drop"
+    )
+  
+  DBI::dbWriteTable(
+    conn=tweets_db, name="delegates_info", overwrite=TRUE, 
+    value=.delegates_info
+  )
+  
+})
 
 ################################################################################
 ################################################################################
@@ -346,6 +378,14 @@ search_tweets_mod <-
 ################################################################################
 ################################################################################
 
+if(FALSE){
+  .transp_r <- 
+    dbGetQuery(tweets_db, "SELECT * FROM `delegates_info`") %>% 
+    rowwise() %>% 
+    group_map(function(.row, ...){as.list(.row)}) %>% 
+    pluck(2)
+}
+
 get_tweets <- function(.transp_r, .verbose=FALSE){
   
   .GlobalEnv[[".message_pars"]] <- list(
@@ -361,7 +401,7 @@ get_tweets <- function(.transp_r, .verbose=FALSE){
     # GET TWEETS FROM USER #
     ########################
     
-    .from_data_last <- 
+    .from_data_db_tbl <- 
       tweets_db %>% 
       tbl("tweets_raw") %>% 
       filter(
@@ -369,113 +409,171 @@ get_tweets <- function(.transp_r, .verbose=FALSE){
         tweet_convers_user_id == !!.transp_r$tweet_convers_user_id
       )
     
-    if(pull(tally(.from_data_last), n) > 0){
-        
-      .from_since_id_this <-
-        .from_data_last %>%
-        summarise(across(tweet_status_id, max, na.rm=TRUE)) %>% 
-        pull(tweet_status_id)
+    .from_data_this_search_since_id <- 
+      tweets_db %>% 
+      tbl("delegates_info") %>% 
+      filter(
+        tweet_convers_user_id == !!.transp_r$tweet_convers_user_id
+      ) %>% 
+      collect() %>% 
+      pluck("from_data_last_search_until_id", .default=bit64::NA_integer64_)
+    
+    if(is.na(.from_data_this_search_since_id)){
+      
+      if(pull(tally(.from_data_db_tbl), n) > 0){
 
-    }else{
-
-      .from_since_id_this <-
-        str_c(str_c(c(letters, as.character(0:9)), collapse=" OR "),
-              " until:", as_date(now(tzone="UTC") - days(5))) %>%
-        search_tweets(n=1) %>% 
-        prep_rtweet_df() %>% 
-        pull(tweet_status_id)
-
+        .from_data_this_search_since_id <-
+          .from_data_db_tbl %>%
+          summarise(across(tweet_status_id, max, na.rm=TRUE)) %>% 
+          pull(tweet_status_id)
+  
+      }else{
+  
+        .from_data_this_search_since_id <-
+          str_c(str_c(c(letters, as.character(0:9)), collapse=" OR "),
+                " until:", as_date(now(tzone="UTC") - days(5))) %>%
+          search_tweets(n=1) %>% 
+          prep_rtweet_df() %>% 
+          pull(tweet_status_id)
+  
+      }
+      
     }
-
+    
     .from_data_this <- 
       get_timeline_mod(
         .screen_name=.transp_r$tweet_convers_user_screen_name, 
-        .since_id=as.character(.from_since_id_this)
+        .since_id=as.character(.from_data_this_search_since_id)
       ) %>% 
       mutate(
         tweet_convers_id = tweet_status_id,
-        tweet_convers_user_id=tweet_user_id,
-        tweet_convers_user_screen_name=tweet_user_screen_name
+        tweet_convers_user_id = tweet_user_id,
+        tweet_convers_user_screen_name = tweet_user_screen_name
       )
 
     if(nrow(.from_data_this) > 0){
 
-      .from_data_this_max_status_id_coll <-
+      .from_data_this_search_until_id <-
         .from_data_this %>%
         summarise(across(tweet_status_id, max)) %>% 
         pull(tweet_status_id)
-
+      
       DBI::dbWriteTable(
         conn=tweets_db, name="tweets_raw", append=TRUE,
         value=.from_data_this
       )
     
+      dbExecute(
+        tweets_db, 
+        str_c(
+          "UPDATE `delegates_info` ",
+          "SET `from_data_last_search_until_id` = ", 
+          .from_data_this_search_until_id, " ",
+          "WHERE `tweet_convers_user_id` = ",
+          .transp_r$tweet_convers_user_id
+        )
+      )
+      
     }  
     
     gc()
     
-    if(!isTRUE(pull(tally(.from_data_last), n) > 0)){return(invisible(NULL))}
+    if(!isTRUE(pull(tally(.from_data_db_tbl), n) > 0)){return(invisible(NULL))}
 
     #########################################
     # GET TWEETS REPLYING TO TWEETS BY USER #
     #########################################
-
-    .repl_data_last <- 
+    
+    .repl_data_db_tbl <- 
       tweets_db %>% 
       tbl("tweets_raw") %>% 
       filter(
         tweet_convers_user_id == !!.transp_r$tweet_convers_user_id,
         tweet_convers_user_id != tweet_user_id
       )
-
-    if(pull(tally(.repl_data_last), n) > 0){
+    
+    .repl_data_last_search_until_date <- 
+      tweets_db %>% 
+      tbl("delegates_info") %>% 
+      filter(
+        tweet_convers_user_id == !!.transp_r$tweet_convers_user_id
+      ) %>% 
+      pull(repl_data_last_search_until_date)
+    
+    .repl_data_this_search_until_date <- date(now(tzone="UTC") - hours(12))
+    
+    .repl_data_this_search_since_id <- 
+      tweets_db %>% 
+      tbl("delegates_info") %>% 
+      filter(
+        tweet_convers_user_id == !!.transp_r$tweet_convers_user_id
+      ) %>% 
+      pull(repl_data_last_search_until_id)
+    
+    if(is.na(.repl_data_this_search_since_id)){
+      
+      if(pull(tally(.repl_data_db_tbl), n) > 0){
         
-      .repl_since_id_this <-
-        .repl_data_last %>%
-        summarise(across(tweet_status_id, max, na.rm=TRUE)) %>% 
-        pull(tweet_status_id)
-
-    }else{
-
-      .repl_since_id_this <- 
-        .from_data_last %>% 
-        summarise(across(tweet_status_id, min, na.rm=TRUE)) %>% 
-        pull(tweet_status_id)
-
+        .repl_data_this_search_since_id <-
+          .repl_data_db_tbl %>%
+          summarise(across(tweet_status_id, max, na.rm=TRUE)) %>% 
+          pull(tweet_status_id)
+        
+      }else{
+        
+        .repl_data_this_search_since_id <- 
+          .from_data_db_tbl %>% 
+          summarise(across(tweet_status_id, min, na.rm=TRUE)) %>% 
+          pull(tweet_status_id)
+        
+      }
+      
     }
     
-    .repl_data_this_query <- str_glue(
-      "@{.transp_r$tweet_convers_user_screen_name} filter:replies ",
-      "until:{as_date(now(tzone='UTC') - hours(12))}"
+    .repl_data_this_search_is_due <- !isTRUE(
+      .repl_data_this_search_until_date <= .repl_data_last_search_until_date
     )
     
-    .repl_data_this <- search_tweets_mod(
-      .search_query=.repl_data_this_query, 
-      .since_id=as.character(.repl_since_id_this)
-    )
+    if(.repl_data_this_search_is_due){
+      
+      .repl_data_this_search_query <- str_glue(
+        "@{.transp_r$tweet_convers_user_screen_name} filter:replies ",
+        "until:{format(.repl_data_this_search_until_date, '%Y-%m-%d')}"
+      )
+      
+      .repl_data_this <- search_tweets_mod(
+        .search_query=.repl_data_this_search_query, 
+        .since_id=as.character(.repl_data_this_search_since_id)
+      )
 
+    }else{
+      
+      .repl_data_this <- prep_rtweet_df(data.frame())
+      
+    }
+    
     .repl_data_this_nrow_coll <- nrow(.repl_data_this)
 
     if(.repl_data_this_nrow_coll > 0){
-
-      .repl_data_this_max_status_id_coll <-
+      
+      .repl_data_this_search_until_id <-
         .repl_data_this %>% 
         summarise(across(tweet_status_id, max)) %>% 
         pull(tweet_status_id)
       
-      .repl_data_this_status_repl_id <-
+      .repl_data_status_repl_id_this <-
         .repl_data_this %>%
         select(tweet_status_id, tweet_reply_to_status_id) %>% 
         drop_na()
 
       .repl_data_last_status_convers_id <-
-        .repl_data_last %>%
+        .repl_data_db_tbl %>%
         select(tweet_status_id, tweet_convers_id) %>% 
         collect() %>% 
         drop_na()
           
       .repl_data_status_id <- c(
-        .repl_data_this_status_repl_id$tweet_status_id,
+        .repl_data_status_repl_id_this$tweet_status_id,
         .repl_data_last_status_convers_id$tweet_status_id
       )
         
@@ -483,7 +581,7 @@ get_tweets <- function(.transp_r, .verbose=FALSE){
         min(.repl_data_this$tweet_created_at) - weeks(4)
         
       .convers_status_id_this <-
-        .from_data_last %>% 
+        .from_data_db_tbl %>% 
         filter(
           is.na(tweet_retweet_status_id),
           as.integer(tweet_created_at) > !!as.integer(.convers_status_oldest)
@@ -501,10 +599,10 @@ get_tweets <- function(.transp_r, .verbose=FALSE){
           ..status_id_this <- integer64()
           ..status_id_this_i <- c(..convers_id, ..status_id_last)
           
-          if(nrow(.repl_data_this_status_repl_id) > 0){
+          if(nrow(.repl_data_status_repl_id_this) > 0){
             while(length(..status_id_this_i) > 0){
               ..status_id_this_i <-
-                .repl_data_this_status_repl_id %>%
+                .repl_data_status_repl_id_this %>%
                 filter(tweet_reply_to_status_id %in% ..status_id_this_i) %>%
                 pull(tweet_status_id)
               ..status_id_this <-
@@ -533,9 +631,31 @@ get_tweets <- function(.transp_r, .verbose=FALSE){
             .transp_r$tweet_convers_user_id
         )
       
-      DBI::dbWriteTable(
+      dbWriteTable(
         conn=tweets_db, name="tweets_raw", append=TRUE,
         value=.repl_data_this
+      )
+      
+      dbExecute(
+        tweets_db, 
+        str_c(
+          "UPDATE `delegates_info` ",
+          "SET `repl_data_last_search_until_id` = ", 
+          .repl_data_this_search_until_id, " ",
+          "WHERE `tweet_convers_user_id` = ",
+          .transp_r$tweet_convers_user_id
+        )
+      )
+      
+      dbExecute(
+        tweets_db, 
+        str_c(
+          "UPDATE `delegates_info` ",
+          "SET `repl_data_last_search_until_date` = ", 
+          .repl_data_this_search_until_date, " ",
+          "WHERE `tweet_convers_user_id` = ",
+          .transp_r$tweet_convers_user_id
+        )
       )
       
       .GlobalEnv[[".message_pars"]][["valid reply share"]] <- 
@@ -547,12 +667,13 @@ get_tweets <- function(.transp_r, .verbose=FALSE){
   }, warning = function(..warning){
     
     ..tweet_log_entry <- list(
-      message=..warning$message, screen_name=.transp_r$screen_name,
+      message=..warning$message, 
+      screen_name=.transp_r$tweet_convers_user_screen_name,
       time=lubridate::now()
     )
     
-    if(is.list(.GlobalEnv[[".get_tweets_logs"]])){
-      modify_in(.GlobalEnv[[".get_tweets_logs"]], "warning", function(...l){
+    if(is.list(.GlobalEnv[["tweets_log"]])){
+      modify_in(.GlobalEnv[["tweets_log"]], "warning", function(...l){
         compact(append(...l, ..tweet_log_entry))
       })
     }
@@ -562,17 +683,16 @@ get_tweets <- function(.transp_r, .verbose=FALSE){
       ": ", ..tweet_log_entry$message
     )
     
-    stop()
-    
   }, error = function(..error){
     
     ..tweet_log_entry <- list(
-      message=..error$message, screen_name=.transp_r$screen_name,
+      message=..error$message, 
+      screen_name=.transp_r$tweet_convers_user_screen_name,
       time=lubridate::now()
     )
     
-    if(is.list(.GlobalEnv[[".get_tweets_logs"]])){
-      modify_in(.GlobalEnv[[".get_tweets_logs"]], "error", function(...l){
+    if(is.list(.GlobalEnv[["tweets_log"]])){
+      modify_in(.GlobalEnv[["tweets_log"]], "error", function(...l){
         compact(append(...l, ..tweet_log_entry))
       })
     }
@@ -582,7 +702,7 @@ get_tweets <- function(.transp_r, .verbose=FALSE){
       ": ", ..tweet_log_entry$message
     )))
     
-    stop()
+    # stop()
 
   }, finally={
     
@@ -607,12 +727,12 @@ while(TRUE){
   if(length(dir_ls(dir_temp)) > 0){dir_create(dir_delete(dir_temp))}
 
   tweets_raw_db <- 
-    delegates_info %>% 
+    dbGetQuery(tweets_db, "SELECT * FROM `delegates_info`") %>% 
     slice_sample(prop=1) %>%
     mutate(obs_id=1:n(), obs_id_rel_max=obs_id/max(obs_id)) %>% 
     rowwise() %>% 
-    group_map(function(.row, ...){as.list(.row)}) %>% #pluck(1) -> .transp_r
-    map(get_tweets, .verbose=TRUE)
+    group_map(function(.row, ...){as.list(.row)}) %>% 
+    walk(get_tweets, .verbose=TRUE)
   
   wait_end_time <- with_tz(min(
     start_time + lubridate::hours(12),
