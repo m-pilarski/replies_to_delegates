@@ -381,9 +381,10 @@ search_tweets_mod <-
 if(FALSE){
   .transp_r <- 
     dbGetQuery(tweets_db, "SELECT * FROM `delegates_info`") %>% 
+    filter(tweet_convers_user_screen_name == "RepEscobar") %>% 
     rowwise() %>% 
     group_map(function(.row, ...){as.list(.row)}) %>% 
-    pluck(2)
+    chuck(1)
 }
 
 get_tweets <- function(.transp_r, .verbose=FALSE){
@@ -430,8 +431,10 @@ get_tweets <- function(.transp_r, .verbose=FALSE){
       }else{
   
         .from_data_this_search_since_id <-
-          str_c(str_c(c(letters, as.character(0:9)), collapse=" OR "),
-                " until:", as_date(now(tzone="UTC") - days(5))) %>%
+          str_c(
+            str_c(c(letters, as.character(0:9)), collapse=" OR "),
+            " until:", as_date(now(tzone="UTC") - days(5))
+          ) %>%
           search_tweets(n=1) %>% 
           prep_rtweet_df() %>% 
           pull(tweet_status_id)
@@ -500,7 +503,9 @@ get_tweets <- function(.transp_r, .verbose=FALSE){
       ) %>% 
       pull(repl_data_last_search_until_date)
     
-    .repl_data_this_search_until_date <- date(now(tzone="UTC") - hours(12))
+    .repl_data_this_search_until_date <- floor_date(
+      now(tzone="UTC") - hours(12), "day"
+    )
     
     .repl_data_this_search_since_id <- 
       tweets_db %>% 
