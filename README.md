@@ -53,7 +53,7 @@ tbl(tweets_db, "tweets_raw")
 
 # Number of rows
 pull(tally(tbl(tweets_db, "tweets_raw")), n)
-#> [1] 22903500
+#> [1] 24720800
 ```
 
 ``` r
