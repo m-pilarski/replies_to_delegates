@@ -11,7 +11,15 @@ API endpoint. As my access to historical data through this API enpoint
 is limited to the past \~7 days, the script has to be executed
 repeatedly.
 
-## …
+## Repeated Data Collection
+
+1.  [get_tweets_raw](https://github.com/m-pilarski/replies_to_delegates/blob/master/01.01-get_tweets_raw.R)
+    -   replies are collected via the [standard search (Version
+        1.1)](https://developer.twitter.com/en/docs/twitter-api/v1/tweets/search/api-reference/get-search-tweets)
+        API endpoint
+    -   the collected tweets are stored in a SQLite Database
+
+## Exemplary results
 
 ``` r
 
@@ -53,7 +61,7 @@ tbl(tweets_db, "tweets_raw")
 
 # Number of rows
 pull(tally(tbl(tweets_db, "tweets_raw")), n)
-#> [1] 24720800
+#> [1] 26376808
 ```
 
 ``` r
@@ -117,14 +125,17 @@ tweets_count %>%
   group_by(tweet_convers_user_party, tweet_created_at_day) %>% 
   summarise(across(count, sum), .groups="drop") %>% 
   mutate(count = modify_if(
-    as.double(count), tweet_convers_user_party != "democrats", `*`, -1
+    as.double(count), tweet_convers_user_party != "democrat", `*`, -1
   )) %>% 
   filter(tweet_created_at_day > lubridate::ymd("2022-06-01")) %>% 
   ggplot(
     aes(x=tweet_created_at_day, y=count, fill=tweet_convers_user_party)
   ) + 
   geom_col(width=1) +
-  scale_y_continuous(labels=function(.b){scales::number(abs(.b))}) +
+  scale_y_continuous(
+    labels=function(.b){scales::number(abs(.b))},
+    limits=function(.l){.m <- max(abs(.l)); c(-.m, .m)}
+  ) +
   rcartocolor::scale_fill_carto_d(palette="Safe") +
   theme(legend.position="bottom")
 ```
