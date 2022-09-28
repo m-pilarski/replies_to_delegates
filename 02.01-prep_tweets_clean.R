@@ -27,6 +27,8 @@ source("./resources/utils.R")
 
 ################################################################################
 
+n_workers <- 4L
+
 dir_data <- dir_create("~/Documents/get_tweets/data")
 dir_temp <- dir_create(path(dir_data, "temp"))
 
@@ -53,14 +55,14 @@ local({
   if(!"tweets_clean" %in% dbListTables(tweets_db)){
     dbWriteTable(
       conn=tweets_db, name="tweets_clean", 
-      value=tibble(tweet_status_id=integer64(), tweet_text=character())
+      value=tibble(tweet_id=integer64(), tweet_text=character())
     )
   }
   
-  tweets_raw_uncleaned_chunk_size <- 1e5L
+  tweets_raw_uncleaned_chunk_size <- 5e5L
   
   tweets_raw_uncleaned_statement <- 
-    "SELECT `tweet_status_id`, `tweet_text` " %s+%
+    "SELECT `tweet_id`, `tweet_text` " %s+%
     "FROM ( " %s+%
     "  SELECT * " %s+%
     "  FROM ( " %s+%
@@ -69,8 +71,8 @@ local({
     "    WHERE (`tweet_lang` = 'en') " %s+%
     "  ) lhs" %s+%
     "  LEFT JOIN `tweets_clean` rhs " %s+%
-    "  ON lhs.`tweet_status_id` = rhs.`tweet_status_id` " %s+%
-    "  WHERE (rhs.`tweet_status_id` IS NULL) " %s+%
+    "  ON lhs.`tweet_id` = rhs.`tweet_id` " %s+%
+    "  WHERE (rhs.`tweet_id` IS NULL) " %s+%
     ") "
   
   tweets_cleaned_counter <- 0L
@@ -82,15 +84,24 @@ local({
     )
     
     .chunk_raw <- dbFetch(
-      res=tweets_raw_uncleaned_query, n=tweets_raw_uncleaned_chunk_size)
+      res=tweets_raw_uncleaned_query, n=tweets_raw_uncleaned_chunk_size
+    )
     
     dbClearResult(tweets_raw_uncleaned_query)
     
-    if(nrow(.chunk_raw) == 0){break()}
+    if(nrow(.chunk_raw) == 0){
+      
+      break()
+      
+    }
     
-    .chunk_mod <- mutate(.chunk_raw, across(tweet_text, function(..text_vec){
-        
-        ..text_vec %>%
+    future::plan(future::multisession, workers=n_workers)
+    
+    .chunk_splits <- burrr::chunk_df(.chunk_raw, .n_chunks=n_workers)
+    
+    .chunk_mod <- furrr::future_map_dfr(.chunk_splits, function(..chunk){
+      mutate(..chunk, across(tweet_text, function(...text_vec){
+        ...text_vec %>%
           str_remove_reply_mentions() %>%
           str_convert_html() %>%
           str_to_lower() %>%
@@ -100,8 +111,10 @@ local({
           str_blur_url() %>%
           str_describe_emoji(.resolution="subgroup") %>%
           str_replace_all("([[:punct:]]|(<[A-Z_]+>))(?: *\\1)+", "\\1")
-        
       }))
+    })
+    
+    future::plan(future::sequential, .cleanup=TRUE)
     
     dbWriteTable(
       conn=tweets_db, name="tweets_clean", value=.chunk_mod, append=TRUE
@@ -132,7 +145,7 @@ local({
 
 tweets_clean_term_count <- local({
   
-  tweets_clean_chunk_size <- 1e5L
+  tweets_clean_chunk_size <- 5e5L
   
   tweets_clean_statement <- "SELECT * FROM `tweets_clean`"
   
@@ -156,7 +169,7 @@ tweets_clean_term_count <- local({
       unnest_longer(tweet_text, values_to="tweet_term") %>% 
       group_by(tweet_term) %>% 
       summarize(
-        term_freq = n(), tweet_freq = n_distinct(tweet_status_id), 
+        term_freq = n(), tweet_freq = n_distinct(tweet_id), 
         .groups="drop"
       ) %>% 
       bind_rows(tweets_clean_term_count) %>% 
@@ -198,19 +211,19 @@ local({
   
   dbWriteTable(
     conn=tweets_db, name="tweets_clean_pruned", overwrite=TRUE,
-    value=tibble(tweet_status_id=integer64(), tweet_text=character())
+    value=tibble(tweet_id=integer64(), tweet_text=character())
   )
   
   tweets_clean_chunk_size <- 1e5
   
   tweets_clean_statement <- 
-    "SELECT `tweet_status_id`, `tweet_text` " %s+%
+    "SELECT `tweet_id`, `tweet_text` " %s+%
     "FROM ( " %s+%
     "  SELECT *" %s+% 
     "  FROM `tweets_clean` lhs " %s+%
     "  LEFT JOIN `tweets_clean_pruned` rhs " %s+%
-    "  ON lhs.`tweet_status_id` = rhs.`tweet_status_id` " %s+%
-    "  WHERE (rhs.`tweet_status_id` IS NULL) " %s+% 
+    "  ON lhs.`tweet_id` = rhs.`tweet_id` " %s+%
+    "  WHERE (rhs.`tweet_id` IS NULL) " %s+% 
     ") "
   
   tweets_clean_pruned_counter <- 0L
@@ -235,13 +248,13 @@ local({
         tweet_text, values_to="tweet_term", indices_to="tweet_position"
       ) %>% 
       semi_join(terms_keep, by="tweet_term") %>% 
-      group_by(tweet_status_id) %>% 
+      group_by(tweet_id) %>% 
       summarize(
         tweet_text = str_c(tweet_term[order(tweet_position)], collapse=" "),
         .groups="drop"
       ) %>% 
       complete(
-        tweet_status_id = pull(.chunk_raw, tweet_status_id),
+        tweet_id = pull(.chunk_raw, tweet_id),
         fill=list(tweet_text="")
       )
       

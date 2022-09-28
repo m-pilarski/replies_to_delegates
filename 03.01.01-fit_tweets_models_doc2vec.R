@@ -1,11 +1,5 @@
 # TODO:
-# sentence-transformers
-# https://www.sbert.net/
-# Batchwise UMAP
-# https://github.com/marouabahri/UMAP-kNN
-# collapse topics
-# https://github.com/ddangelov/Top2Vec/blob/d625b507aa18a921b7d0a3710d1a4c176f9b8f84/top2vec/Top2Vec.py#L1777
-
+# - use https://www.sbert.net/
 
 ################################################################################
 
@@ -329,3 +323,9 @@ docs_hdbscan_mod$condensed_tree_$to_pandas() %>%
 ################################################################################
 ################################################################################
 ################################################################################
+
+# collapse topics
+# https://github.com/ddangelov/Top2Vec/blob/d625b507aa18a921b7d0a3710d1a4c176f9b8f84/top2vec/Top2Vec.py#L1777
+
+# Batchwise UMAP
+# https://github.com/marouabahri/UMAP-kNN
